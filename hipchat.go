@@ -3,17 +3,16 @@ package hipchat
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
+	"bytes"
 )
 
 const (
-	defaultBaseURL = "https://api.hipchat.com/v1"
+	defaultBaseURL = "https://api.hipchat.com/v2"
 
 	ColorYellow = "yellow"
 	ColorRed    = "red"
@@ -30,14 +29,22 @@ const (
 
 type MessageRequest struct {
 	// Required. ID or name of the room.
-	RoomId string
+	RoomId string  `json:"-"`
+
+	// Required. The message body. 10,000 characters max.
+	Message string  `json:"message"`
+}
+
+type NotificationRequest struct {
+	// Required. ID or name of the room.
+	RoomId string  `json:"-"`
 
 	// Required. Name the message will appear to be sent from. Must be less
 	// than 15 characters long. May contain letters, numbers, -, _, and spaces.
-	From string
+	From string  `json:"from"`
 
 	// Required. The message body. 10,000 characters max.
-	Message string
+	Message string  `json:"message"`
 
 	// Determines how the message is treated by our server and rendered
 	// inside HipChat applications.
@@ -49,22 +56,20 @@ type MessageRequest struct {
 	// text - Message is treated just like a message sent by a user. Can include
 	// @mentions, emoticons, pastes, and auto-detected URLs (Twitter, YouTube, images, etc).
 	// (default: html)
-	MessageFormat string
+	MessageFormat string `json:"message_format"`
 
 	// Whether or not this message should trigger a notification for people
 	// in the room (change the tab color, play a sound, etc). Each recipient's
 	// notification preferences are taken into account. 0 = false, 1 = true.
 	// (default: 0)
-	Notify bool
+	Notify bool `json:"notify"`
 
 	// Background color for message. One of "yellow", "red", "green",
 	// "purple", "gray", or "random".
 	// (default: yellow)
-	Color string
+	Color string `json:"color"`
 
-	// Whether to test authentication. Note: the normal actions will NOT be performed.
-	// (default: false)
-	AuthTest bool
+   //TODO Impletem Card Object
 }
 
 type AuthResponse struct {
@@ -103,43 +108,19 @@ func NewClient(authToken string) Client {
 	}
 }
 
-func urlValuesFromMessageRequest(req MessageRequest) (url.Values, error) {
-	if len(req.RoomId) == 0 || len(req.From) == 0 || len(req.Message) == 0 {
-		return nil, errors.New("The RoomId, From, and Message fields are all required.")
-	}
-	payload := url.Values{
-		"room_id": {req.RoomId},
-		"from":    {req.From},
-		"message": {req.Message},
-	}
-	if req.Notify == true {
-		payload.Add("notify", "1")
-	}
-	if len(req.Color) > 0 {
-		payload.Add("color", req.Color)
-	}
-	if len(req.MessageFormat) > 0 {
-		payload.Add("message_format", req.MessageFormat)
-	}
-	return payload, nil
-}
-
 func (c *Client) PostMessage(req MessageRequest) error {
 	if len(c.BaseURL) == 0 {
 		c.BaseURL = defaultBaseURL
 	}
-	uri := fmt.Sprintf("%s/rooms/message?auth_token=%s", c.BaseURL, url.QueryEscape(c.AuthToken))
-	if req.AuthTest {
-		uri += "&auth_test=true"
-	}
-
-	payload, err := urlValuesFromMessageRequest(req)
+	uri := fmt.Sprintf("%s/room/%s/message?auth_token=%s", c.BaseURL, req.RoomId, url.QueryEscape(c.AuthToken))
+	
+	encodedJson, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
 
-	reqs, err := http.NewRequest("POST", uri, strings.NewReader(payload.Encode()))
-	reqs.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	reqs, err := http.NewRequest("POST", uri, bytes.NewBuffer(encodedJson))
+	reqs.Header.Add("Content-Type", "application/json")
 	if err != nil {
 		return err
 	}
@@ -159,24 +140,56 @@ func (c *Client) PostMessage(req MessageRequest) error {
 		return err
 	}
 
-	if req.AuthTest {
-		msgResp := &AuthResponse{}
-		if err := json.Unmarshal(body, msgResp); err != nil {
-			return err
-		}
-		if msgResp.Error != nil {
-			return msgResp.Error
-		}
-	} else {
-		msgResp := &struct{ Status string }{}
-		if err := json.Unmarshal(body, msgResp); err != nil {
-			return err
-		}
-		if msgResp.Status != ResponseStatusSent {
-			return getError(body)
-		}
+	msgResp := &struct{ Status string }{}
+	if err := json.Unmarshal(body, msgResp); err != nil {
+		return err
+	}
+	if msgResp.Status != ResponseStatusSent {
+		return getError(body)
+	}
+	return nil
+}
+
+
+func (c *Client) PostNotification(req NotificationRequest) error {
+	if len(c.BaseURL) == 0 {
+		c.BaseURL = defaultBaseURL
+	}
+	uri := fmt.Sprintf("%s/room/%s/notification?auth_token=%s", c.BaseURL, req.RoomId, url.QueryEscape(c.AuthToken))
+	
+	encodedJson, err := json.Marshal(req)
+	if err != nil {
+		return err
 	}
 
+	reqs, err := http.NewRequest("POST", uri, bytes.NewBuffer(encodedJson))
+	reqs.Header.Add("Content-Type", "application/json")
+	if err != nil {
+		return err
+	}
+	client := &http.Client{
+		Transport: c.Transport,
+		Timeout:   c.Timeout,
+	}
+
+	resp, err := client.Do(reqs)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	msgResp := &struct{ Status string }{}
+	if err := json.Unmarshal(body, msgResp); err != nil {
+		return err
+	}
+	if msgResp.Status != ResponseStatusSent {
+		return getError(body)
+	}
 	return nil
 }
 
